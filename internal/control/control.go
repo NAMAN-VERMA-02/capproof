@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NAMAN-VERMA-02/capproof/internal/meter"
 	"github.com/NAMAN-VERMA-02/capproof/internal/money"
 )
 
@@ -98,7 +99,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var hold money.Pico
 	if g.mode == Strict {
-		maxTokens, err := outputLimit(body)
+		call, err := meter.Inspect(body)
 		if err != nil {
 			refuse(w, http.StatusBadRequest, err.Error())
 			return
@@ -106,7 +107,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Each input token is at least four bytes for the mock provider, so a
 		// count over the whole body can only overestimate.
 		inputBound := int64(len(body)+3) / 4
-		hold = money.Add(money.Mul(g.inputRate, inputBound), money.Mul(g.outputRate, maxTokens))
+		hold = money.Add(money.Mul(g.inputRate, inputBound), money.Mul(g.outputRate, call.MaxOutput))
 	}
 	if !g.admit(hold) {
 		refuse(w, http.StatusTooManyRequests, "budget exceeded")
@@ -115,55 +116,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	cost, known, sent := g.forward(w, r, body)
 	g.settle(hold, cost, known, sent)
-}
-
-// outputLimit returns the most output a call can be billed for, or an error when
-// that cannot be known. It guards against parser differentials: this gateway and
-// the provider must agree on the limit, yet they may treat duplicate keys, letter
-// case and the two field names differently, and each gap is a way to hold for one
-// token and be billed for thousands.
-func outputLimit(body []byte) (int64, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return 0, errors.New("the request must be a JSON object")
-	}
-	seen := map[string]bool{}
-	limit := int64(0)
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return 0, errors.New("the request is not valid JSON")
-		}
-		key := tok.(string)
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return 0, errors.New("the request is not valid JSON")
-		}
-		lower := strings.ToLower(key)
-		if lower != "max_tokens" && lower != "max_completion_tokens" && lower != "n" {
-			continue
-		}
-		if lower != key || seen[lower] {
-			return 0, fmt.Errorf("the %q field is repeated or wrongly cased, so the limit is ambiguous", key)
-		}
-		seen[lower] = true
-		var n int64
-		if err := json.Unmarshal(value, &n); err != nil || n < 1 {
-			return 0, fmt.Errorf("%s must be a positive integer", lower)
-		}
-		if lower == "n" {
-			if n != 1 {
-				return 0, errors.New("only n=1 can be held for")
-			}
-			continue
-		}
-		limit = max(limit, n)
-	}
-	if limit == 0 {
-		// Without an output limit the worst case is unbounded, so no hold can be sound.
-		return 0, errors.New("a positive max_tokens is required to bound the cost")
-	}
-	return limit, nil
 }
 
 func refuse(w http.ResponseWriter, status int, msg string) {
@@ -246,7 +198,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, body []byte) (
 	}
 
 	rc := http.NewResponseController(w)
-	tracker := usageTracker{inputRate: g.inputRate, outputRate: g.outputRate}
+	tracker := meter.Tracker{Rates: meter.Rates{Input: g.inputRate, Output: g.outputRate}}
 	isStream := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 	reader := bufio.NewReader(limited)
 	complete := false
@@ -255,10 +207,10 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, body []byte) (
 		if len(line) > 0 {
 			if isStream {
 				if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-					tracker.feed(data)
+					tracker.Feed(data)
 				}
 			} else {
-				tracker.feed(line)
+				tracker.Feed(line)
 			}
 			if _, err := w.Write(line); err != nil {
 				return 0, false, true
@@ -276,74 +228,9 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, body []byte) (
 		return 0, false, true
 	}
 	// A stream cut off cleanly still reads as EOF, with usage that stops early.
-	if isStream && !tracker.finished {
+	if isStream && !tracker.Finished() {
 		return 0, false, true
 	}
-	cost, known = tracker.cost()
+	cost, known = tracker.Cost()
 	return cost, known, true
-}
-
-// usageTracker keeps the latest usage seen in a response. Streams report usage
-// cumulatively, so the last value wins, and malformed usage makes the cost unknown.
-type usageTracker struct {
-	inputRate, outputRate money.Pico
-	input, output         *int64
-	malformed             bool
-	finished              bool
-}
-
-func (u *usageTracker) feed(data []byte) {
-	data = bytes.TrimSpace(data)
-	if string(data) == "[DONE]" {
-		u.finished = true
-		return
-	}
-	if len(data) == 0 || data[0] != '{' {
-		return
-	}
-	var doc struct {
-		Type    string          `json:"type"`
-		Usage   json.RawMessage `json:"usage"`
-		Message struct {
-			Usage json.RawMessage `json:"usage"`
-		} `json:"message"`
-	}
-	if json.Unmarshal(data, &doc) != nil {
-		return
-	}
-	if doc.Type == "message_stop" {
-		u.finished = true
-	}
-	for _, raw := range []json.RawMessage{doc.Usage, doc.Message.Usage} {
-		if len(raw) == 0 || string(raw) == "null" {
-			continue
-		}
-		var fields struct {
-			PromptTokens     *int64 `json:"prompt_tokens"`
-			CompletionTokens *int64 `json:"completion_tokens"`
-			InputTokens      *int64 `json:"input_tokens"`
-			OutputTokens     *int64 `json:"output_tokens"`
-		}
-		if json.Unmarshal(raw, &fields) != nil {
-			u.malformed = true
-			continue
-		}
-		for _, in := range []*int64{fields.PromptTokens, fields.InputTokens} {
-			if in != nil {
-				u.input = in
-			}
-		}
-		for _, out := range []*int64{fields.CompletionTokens, fields.OutputTokens} {
-			if out != nil {
-				u.output = out
-			}
-		}
-	}
-}
-
-func (u *usageTracker) cost() (money.Pico, bool) {
-	if u.malformed || u.input == nil || u.output == nil || *u.input < 0 || *u.output < 0 {
-		return 0, false
-	}
-	return money.Add(money.Mul(u.inputRate, *u.input), money.Mul(u.outputRate, *u.output)), true
 }

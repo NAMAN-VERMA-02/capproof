@@ -10,42 +10,6 @@ import (
 	"github.com/NAMAN-VERMA-02/capproof/internal/money"
 )
 
-func TestOutputLimit(t *testing.T) {
-	tests := []struct {
-		name, body string
-		want       int64
-		wantErr    bool
-	}{
-		{name: "plain", body: `{"max_tokens":5}`, want: 5},
-		{name: "new name", body: `{"max_completion_tokens":7}`, want: 7},
-		// Holding for the smaller of the two would undercount if the provider uses the larger.
-		{name: "both take the larger", body: `{"max_tokens":1,"max_completion_tokens":9000}`, want: 9000},
-		{name: "n of one", body: `{"max_tokens":5,"n":1}`, want: 5},
-		{name: "nested does not count", body: `{"metadata":{"max_tokens":1},"max_tokens":5}`, want: 5},
-		{name: "duplicate key", body: `{"max_tokens":9000,"max_tokens":1}`, wantErr: true},
-		{name: "case variant", body: `{"max_tokens":9000,"MAX_TOKENS":1}`, wantErr: true},
-		{name: "case variant alone", body: `{"Max_Tokens":1}`, wantErr: true},
-		{name: "n above one", body: `{"max_tokens":5,"n":100}`, wantErr: true},
-		{name: "fractional", body: `{"max_tokens":1.5}`, wantErr: true},
-		{name: "string", body: `{"max_tokens":"5"}`, wantErr: true},
-		{name: "null", body: `{"max_tokens":null}`, wantErr: true},
-		{name: "zero", body: `{"max_tokens":0}`, wantErr: true},
-		{name: "negative", body: `{"max_tokens":-1}`, wantErr: true},
-		{name: "missing", body: `{"model":"m"}`, wantErr: true},
-		{name: "array", body: `[{"max_tokens":5}]`, wantErr: true},
-		{name: "truncated", body: `{"max_tokens":5`, wantErr: true},
-		{name: "empty", body: ``, wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := outputLimit([]byte(tt.body))
-			if (err != nil) != tt.wantErr || got != tt.want {
-				t.Fatalf("outputLimit = %d, %v; want %d, error %t", got, err, tt.want, tt.wantErr)
-			}
-		})
-	}
-}
-
 // The attack: declare a one-token limit where the gateway looks, and a large one
 // where the provider looks. The strict control must not be billed past its hold.
 func TestLimitSmugglingCannotBeatTheHold(t *testing.T) {
