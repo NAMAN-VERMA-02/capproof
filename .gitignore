@@ -1,0 +1,12 @@
+# Binaries and build output
+/capproof
+*.exe
+*.test
+*.out
+/dist/
+
+# Local secrets and scratch state
+.env
+.env.*
+*.db
+*.sqlite*
