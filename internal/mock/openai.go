@@ -62,7 +62,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config()
 	input := InputTokens(req.Messages, req.Tools)
 	output, truncated := outputTokens(cfg, limit)
-	s.begin(cfg, input)
+	if !s.begin(cfg, input, body) {
+		writeJSON(w, http.StatusServiceUnavailable, openAIError("the mock provider is overloaded"))
+		return
+	}
 	defer s.end()
 
 	finish := "stop"

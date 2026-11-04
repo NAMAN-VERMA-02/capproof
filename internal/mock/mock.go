@@ -7,6 +7,7 @@ package mock
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +21,15 @@ import (
 	"github.com/NAMAN-VERMA-02/capproof/internal/money"
 )
 
-const maxBody = 8 << 20
+const (
+	maxBody = 8 << 20
+	// A cap on concurrent calls keeps a flood from exhausting memory, since each
+	// call in "full" mode keeps running after its client has gone.
+	defaultMaxInFlight = 4096
+	bodyReadTimeout    = 30 * time.Second
+	// TokenHeader carries the oracle token. Only the runner holds it.
+	TokenHeader = "X-Capproof-Oracle-Token"
+)
 
 // Config controls pricing, pacing and the faults the provider injects.
 type Config struct {
@@ -39,6 +48,10 @@ type Config struct {
 	Usage string `json:"usage"`
 	// IgnoreMaxTokens generates OutputTokens even past the request's limit.
 	IgnoreMaxTokens bool `json:"ignore_max_tokens"`
+	// RunID marks calls that belong to this run. Every prompt contains it, so a
+	// call without it is a late retry from an earlier run or was invented by the
+	// gateway, and the bill can no longer be attributed to this run.
+	RunID string `json:"run_id,omitempty"`
 }
 
 // DefaultConfig prices calls like gpt-4o-mini ($0.15/$0.60 per million tokens).
@@ -81,6 +94,8 @@ func (c Config) Validate() error {
 type Snapshot struct {
 	Requests     int64      `json:"requests"`
 	Rejected     int64      `json:"rejected"`
+	Overloaded   int64      `json:"overloaded"`
+	Foreign      int64      `json:"foreign_calls"`
 	Unrouted     int64      `json:"unrouted"`
 	LastUnrouted string     `json:"last_unrouted,omitempty"`
 	InFlight     int64      `json:"in_flight"`
@@ -97,6 +112,11 @@ type Snapshot struct {
 type Server struct {
 	defaults Config
 	seq      atomic.Int64
+	// OracleToken, when set, is required on every oracle route. The gateway under
+	// test shares a network with this server and is untrusted: without a token it
+	// could reset the ledger mid-run and turn a breach into a pass.
+	OracleToken string
+	maxInFlight int64
 
 	mu  sync.Mutex
 	cfg Config
@@ -108,7 +128,7 @@ func New(cfg Config) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return &Server{defaults: cfg, cfg: cfg}, nil
+	return &Server{defaults: cfg, cfg: cfg, maxInFlight: defaultMaxInFlight}, nil
 }
 
 // Handler routes provider and oracle requests.
@@ -120,8 +140,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.messages)
 	mux.HandleFunc("GET /v1/models", s.models)
 	mux.HandleFunc("GET /models", s.models)
-	mux.HandleFunc("GET /_oracle", s.oracle)
-	mux.HandleFunc("POST /_oracle/reset", s.reset)
+	mux.HandleFunc("GET /_oracle", s.admin(s.oracle))
+	mux.HandleFunc("POST /_oracle/reset", s.admin(s.reset))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -130,11 +150,28 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.s.Unrouted++
-		s.s.LastUnrouted = r.Method + " " + r.URL.Path
+		s.s.LastUnrouted = truncate(r.Method+" "+r.URL.Path, 200)
 		s.mu.Unlock()
 		http.NotFound(w, r)
 	})
 	return mux
+}
+
+func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.OracleToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get(TokenHeader)), []byte(s.OracleToken)) != 1 {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "the oracle token is missing or wrong"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+func truncate(v string, n int) string {
+	if len(v) > n {
+		return v[:n]
+	}
+	return v
 }
 
 // Snapshot returns the current oracle reading.
@@ -188,14 +225,24 @@ func (s *Server) config() Config {
 	return s.cfg
 }
 
-func (s *Server) begin(cfg Config, input int) {
+// begin admits one call and bills its input. It reports false when the provider
+// is overloaded, in which case nothing is billed and end must not be called.
+func (s *Server) begin(cfg Config, input int, body []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.s.InFlight >= s.maxInFlight {
+		s.s.Overloaded++
+		return false
+	}
+	if cfg.RunID != "" && !bytes.Contains(body, []byte(cfg.RunID)) {
+		s.s.Foreign++
+	}
 	s.s.Requests++
 	s.s.InFlight++
 	s.s.MaxInFlight = max(s.s.MaxInFlight, s.s.InFlight)
 	s.s.InputTokens += int64(input)
 	s.s.Billed = money.Add(s.s.Billed, money.Mul(cfg.InputRate, int64(input)))
+	return true
 }
 
 func (s *Server) end() {
@@ -305,7 +352,12 @@ func text(tokens int) string {
 
 // readBody reads a size-limited body, writing the error itself on failure.
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request, fail func(string) any) ([]byte, bool) {
+	// Only the body gets a deadline. A server-wide read timeout would also fire on
+	// the disconnect watcher and make long streams look abandoned.
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	_ = rc.SetReadDeadline(time.Time{})
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {

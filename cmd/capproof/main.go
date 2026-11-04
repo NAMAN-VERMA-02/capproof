@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -89,6 +91,15 @@ func runMock(args []string) error {
 	if err != nil {
 		return err
 	}
+	server.OracleToken = os.Getenv("CAPPROOF_ORACLE_TOKEN")
+	if server.OracleToken == "" {
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return err
+		}
+		server.OracleToken = hex.EncodeToString(b[:])
+		log.Printf("set CAPPROOF_ORACLE_TOKEN=%s for capproof run", server.OracleToken)
+	}
 	log.Printf("mock provider and oracle listening on %s", *addr)
 	return serve(*addr, server.Handler())
 }
@@ -166,6 +177,7 @@ func runScenario(args []string) error {
 	o.Mock = json.RawMessage(*mockJSON)
 	// From the environment, so the key stays out of the process list and shell history.
 	o.APIKey = os.Getenv("CAPPROOF_API_KEY")
+	o.OracleToken = os.Getenv("CAPPROOF_ORACLE_TOKEN")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

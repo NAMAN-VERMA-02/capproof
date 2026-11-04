@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/NAMAN-VERMA-02/capproof/internal/money"
 )
@@ -26,7 +27,16 @@ const (
 	Strict = "strict"
 )
 
-const maxBody = 8 << 20
+const (
+	maxBody     = 8 << 20
+	maxResponse = 64 << 20
+)
+
+// hopByHop headers describe one connection and must not cross the proxy.
+var hopByHop = []string{
+	"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+	"Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+}
 
 // Gateway is one control gateway with a single shared budget.
 type Gateway struct {
@@ -77,7 +87,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(30 * time.Second))
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	_ = rc.SetReadDeadline(time.Time{})
 	if err != nil {
 		http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
 		return
@@ -85,18 +98,15 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var hold money.Pico
 	if g.mode == Strict {
-		var limit struct {
-			MaxTokens *int64 `json:"max_tokens"`
-		}
-		if err := json.Unmarshal(body, &limit); err != nil || limit.MaxTokens == nil || *limit.MaxTokens < 1 {
-			// Without an output limit the worst case is unbounded, so no hold can be sound.
-			refuse(w, http.StatusBadRequest, "a positive max_tokens is required to bound the cost")
+		maxTokens, err := outputLimit(body)
+		if err != nil {
+			refuse(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// Each input token is at least four bytes for the mock provider, so a
 		// count over the whole body can only overestimate.
 		inputBound := int64(len(body)+3) / 4
-		hold = money.Add(money.Mul(g.inputRate, inputBound), money.Mul(g.outputRate, *limit.MaxTokens))
+		hold = money.Add(money.Mul(g.inputRate, inputBound), money.Mul(g.outputRate, maxTokens))
 	}
 	if !g.admit(hold) {
 		refuse(w, http.StatusTooManyRequests, "budget exceeded")
@@ -105,6 +115,55 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	cost, known, sent := g.forward(w, r, body)
 	g.settle(hold, cost, known, sent)
+}
+
+// outputLimit returns the most output a call can be billed for, or an error when
+// that cannot be known. It guards against parser differentials: this gateway and
+// the provider must agree on the limit, yet they may treat duplicate keys, letter
+// case and the two field names differently, and each gap is a way to hold for one
+// token and be billed for thousands.
+func outputLimit(body []byte) (int64, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return 0, errors.New("the request must be a JSON object")
+	}
+	seen := map[string]bool{}
+	limit := int64(0)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return 0, errors.New("the request is not valid JSON")
+		}
+		key := tok.(string)
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return 0, errors.New("the request is not valid JSON")
+		}
+		lower := strings.ToLower(key)
+		if lower != "max_tokens" && lower != "max_completion_tokens" && lower != "n" {
+			continue
+		}
+		if lower != key || seen[lower] {
+			return 0, fmt.Errorf("the %q field is repeated or wrongly cased, so the limit is ambiguous", key)
+		}
+		seen[lower] = true
+		var n int64
+		if err := json.Unmarshal(value, &n); err != nil || n < 1 {
+			return 0, fmt.Errorf("%s must be a positive integer", lower)
+		}
+		if lower == "n" {
+			if n != 1 {
+				return 0, errors.New("only n=1 can be held for")
+			}
+			continue
+		}
+		limit = max(limit, n)
+	}
+	if limit == 0 {
+		// Without an output limit the worst case is unbounded, so no hold can be sound.
+		return 0, errors.New("a positive max_tokens is required to bound the cost")
+	}
+	return limit, nil
 }
 
 func refuse(w http.ResponseWriter, status int, msg string) {
@@ -158,7 +217,9 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, body []byte) (
 		return 0, false, false
 	}
 	req.Header = r.Header.Clone()
-	req.Header.Del("Connection")
+	for _, name := range hopByHop {
+		req.Header.Del(name)
+	}
 
 	resp, err := g.client.Do(req)
 	if err != nil {
@@ -173,16 +234,21 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, body []byte) (
 	for name, values := range resp.Header {
 		w.Header()[name] = values
 	}
+	for _, name := range hopByHop {
+		w.Header().Del(name)
+	}
 	w.WriteHeader(resp.StatusCode)
+	limited := &io.LimitedReader{R: resp.Body, N: maxResponse}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		_, _ = io.Copy(w, resp.Body)
-		return 0, false, false
+		_, _ = io.Copy(w, limited)
+		// A 4xx was refused unbilled. A 5xx may have failed after generating output.
+		return 0, false, resp.StatusCode >= 500
 	}
 
 	rc := http.NewResponseController(w)
 	tracker := usageTracker{inputRate: g.inputRate, outputRate: g.outputRate}
 	isStream := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
-	reader := bufio.NewReader(resp.Body)
+	reader := bufio.NewReader(limited)
 	complete := false
 	for {
 		line, readErr := reader.ReadBytes('\n')
@@ -202,11 +268,15 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, body []byte) (
 			}
 		}
 		if readErr != nil {
-			complete = errors.Is(readErr, io.EOF)
+			complete = errors.Is(readErr, io.EOF) && limited.N > 0
 			break
 		}
 	}
 	if !complete || r.Context().Err() != nil {
+		return 0, false, true
+	}
+	// A stream cut off cleanly still reads as EOF, with usage that stops early.
+	if isStream && !tracker.finished {
 		return 0, false, true
 	}
 	cost, known = tracker.cost()
@@ -219,14 +289,20 @@ type usageTracker struct {
 	inputRate, outputRate money.Pico
 	input, output         *int64
 	malformed             bool
+	finished              bool
 }
 
 func (u *usageTracker) feed(data []byte) {
 	data = bytes.TrimSpace(data)
+	if string(data) == "[DONE]" {
+		u.finished = true
+		return
+	}
 	if len(data) == 0 || data[0] != '{' {
 		return
 	}
 	var doc struct {
+		Type    string          `json:"type"`
 		Usage   json.RawMessage `json:"usage"`
 		Message struct {
 			Usage json.RawMessage `json:"usage"`
@@ -234,6 +310,9 @@ func (u *usageTracker) feed(data []byte) {
 	}
 	if json.Unmarshal(data, &doc) != nil {
 		return
+	}
+	if doc.Type == "message_stop" {
+		u.finished = true
 	}
 	for _, raw := range []json.RawMessage{doc.Usage, doc.Message.Usage} {
 		if len(raw) == 0 || string(raw) == "null" {
