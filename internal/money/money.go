@@ -88,3 +88,8 @@ func (p Pico) String() string {
 	}
 	return fmt.Sprintf("%s$%s.%s", sign, whole, digits)
 }
+
+// Dollars formats the amount as a plain decimal that ParseUSD reads back exactly.
+func (p Pico) Dollars() string {
+	return strings.TrimPrefix(p.String(), "$")
+}
