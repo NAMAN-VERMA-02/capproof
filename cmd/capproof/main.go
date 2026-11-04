@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NAMAN-VERMA-02/capproof/internal/control"
 	"github.com/NAMAN-VERMA-02/capproof/internal/mock"
 	"github.com/NAMAN-VERMA-02/capproof/internal/money"
 	"github.com/NAMAN-VERMA-02/capproof/internal/runner"
@@ -24,6 +25,7 @@ const usage = `capproof tests whether an LLM spend cap holds when things go wron
 
 Commands:
   mock    run the fake provider and billing oracle
+  control run a calibration gateway: naive must fail, strict must pass
   run     send a scenario through a gateway and judge it against the oracle
 
 Exit codes for run: 0 held, 1 breached, 2 inconclusive, 3 could not run.
@@ -40,6 +42,8 @@ func main() {
 	switch os.Args[1] {
 	case "mock":
 		err = runMock(os.Args[2:])
+	case "control":
+		err = runControl(os.Args[2:])
 	case "run":
 		err = runScenario(os.Args[2:])
 	case "-h", "--help", "help":
@@ -87,6 +91,37 @@ func runMock(args []string) error {
 	}
 	log.Printf("mock provider and oracle listening on %s", *addr)
 	return serve(*addr, server.Handler())
+}
+
+func runControl(args []string) error {
+	fs := flag.NewFlagSet("control", flag.ContinueOnError)
+	mode := fs.String("mode", control.Strict, "naive or strict")
+	addr := fs.String("addr", "127.0.0.1:9401", "listen address")
+	upstream := fs.String("upstream", "http://127.0.0.1:9400", "base URL of the provider")
+	capUSD := fs.String("cap-usd", "", "budget in dollars")
+	inRate := fs.String("input-usd-per-mtok", "0.15", "input price in dollars per million tokens")
+	outRate := fs.String("output-usd-per-mtok", "0.60", "output price in dollars per million tokens")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	limit, err := money.ParseUSD(*capUSD)
+	if err != nil {
+		return fmt.Errorf("-cap-usd: %w", err)
+	}
+	in, err := money.ParseRate(*inRate)
+	if err != nil {
+		return fmt.Errorf("-input-usd-per-mtok: %w", err)
+	}
+	out, err := money.ParseRate(*outRate)
+	if err != nil {
+		return fmt.Errorf("-output-usd-per-mtok: %w", err)
+	}
+	gw, err := control.New(*mode, *upstream, limit, in, out)
+	if err != nil {
+		return err
+	}
+	log.Printf("%s control gateway listening on %s", *mode, *addr)
+	return serve(*addr, gw)
 }
 
 type headerList []string
