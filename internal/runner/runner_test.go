@@ -74,7 +74,7 @@ func TestJudgeWarnings(t *testing.T) {
 		want     string
 	}{
 		{"cached", Report{Admitted: 10, Provider: mock.Snapshot{Requests: 2}}, Burst, "answered without it"},
-		{"retries", Report{Admitted: 2, Provider: mock.Snapshot{Requests: 6}}, Burst, "retrying"},
+		{"retries", Report{Admitted: 2, Provider: mock.Snapshot{Requests: 6}}, Burst, "already spent"},
 		{"no overlap", Report{Sent: 5, Provider: mock.Snapshot{MaxInFlight: 1}}, Burst, "never overlapped"},
 		{"no disconnects", Report{Admitted: 1, Provider: mock.Snapshot{Requests: 1}}, Disconnect, "no disconnect reached"},
 		{"wrong route", Report{Provider: mock.Snapshot{Unrouted: 2, LastUnrouted: "POST /v1/responses"}}, Sequential, "/v1/responses"},

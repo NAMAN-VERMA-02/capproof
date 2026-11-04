@@ -543,7 +543,7 @@ func judge(rep *Report, scenario string) (verdict string, reasons, warnings []st
 		warnings = append(warnings, fmt.Sprintf("%d call(s) succeeded but only %d reached the provider; something answered without it", rep.Admitted, provider.Requests))
 	}
 	if provider.Requests > int64(rep.Admitted) {
-		warnings = append(warnings, fmt.Sprintf("the provider saw %d call(s) for %d success(es); the gateway may be retrying", provider.Requests, rep.Admitted))
+		warnings = append(warnings, fmt.Sprintf("the provider saw %d call(s) for %d success(es), so the gateway retried or failed calls it had already spent money on", provider.Requests, rep.Admitted))
 	}
 	if scenario == Burst && rep.Sent >= 2 && provider.MaxInFlight < 2 {
 		warnings = append(warnings, "calls never overlapped at the provider, so concurrency was not really tested")
