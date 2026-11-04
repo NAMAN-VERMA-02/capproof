@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/NAMAN-VERMA-02/capproof/internal/mock"
 	"github.com/NAMAN-VERMA-02/capproof/internal/money"
@@ -57,6 +58,7 @@ type Options struct {
 	Timeout     time.Duration // per call
 	Drain       time.Duration // how long the provider may take to go idle
 	RunID       string        // generated when empty
+	OracleToken string        // sent only to the oracle, never to the target
 	Mock        json.RawMessage
 }
 
@@ -136,7 +138,11 @@ func (o *Options) validate() error {
 	for name, raw := range map[string]string{"target": o.Target, "oracle": o.Oracle} {
 		u, err := url.Parse(raw)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("%s must be an http(s) URL, got %q", name, raw)
+			return fmt.Errorf("%s must be an http(s) URL", name)
+		}
+		// The target is copied into reports, which get published.
+		if u.User != nil {
+			return fmt.Errorf("%s must not contain credentials; use CAPPROOF_API_KEY", name)
 		}
 	}
 	switch {
@@ -171,6 +177,7 @@ func (o *Options) validate() error {
 type run struct {
 	o       Options
 	client  *http.Client
+	oracle  *http.Client
 	url     string
 	headers http.Header
 
@@ -199,9 +206,17 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 			// A direct transport: an inherited proxy setting would silently put
 			// another hop between the test and the gateway.
 			Transport: &http.Transport{
-				MaxIdleConnsPerHost: o.Concurrency,
-				DisableCompression:  true,
+				MaxIdleConnsPerHost:    o.Concurrency,
+				DisableCompression:     true,
+				MaxResponseHeaderBytes: 1 << 20, // the gateway is untrusted
 			},
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		// Separate from the gateway's client, so the token cannot follow a redirect
+		// and a hung oracle cannot stall the run.
+		oracle: &http.Client{
+			Transport:     &http.Transport{},
+			Timeout:       10 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		url:     endpoint(o.Target, o.Format),
@@ -214,6 +229,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		},
 	}
 	defer r.client.CloseIdleConnections()
+	defer r.oracle.CloseIdleConnections()
 
 	cfg, err := r.resetOracle(ctx)
 	if err != nil {
@@ -282,15 +298,24 @@ func buildHeaders(o Options) http.Header {
 }
 
 func (r *run) resetOracle(ctx context.Context) (mock.Config, error) {
-	overrides := r.o.Mock
-	if len(overrides) == 0 {
-		overrides = json.RawMessage("{}")
+	overrides := map[string]json.RawMessage{}
+	if len(r.o.Mock) > 0 {
+		if err := json.Unmarshal(r.o.Mock, &overrides); err != nil {
+			return mock.Config{}, fmt.Errorf("provider overrides: %w", err)
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(r.o.Oracle, "/")+"/_oracle/reset", bytes.NewReader(overrides))
+	runID, _ := json.Marshal(r.o.RunID)
+	overrides["run_id"] = runID
+	payload, err := json.Marshal(overrides)
 	if err != nil {
 		return mock.Config{}, err
 	}
-	resp, err := r.client.Do(req)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(r.o.Oracle, "/")+"/_oracle/reset", bytes.NewReader(payload))
+	if err != nil {
+		return mock.Config{}, err
+	}
+	req.Header.Set(mock.TokenHeader, r.o.OracleToken)
+	resp, err := r.oracle.Do(req)
 	if err != nil {
 		return mock.Config{}, fmt.Errorf("oracle unreachable: %w", err)
 	}
@@ -380,14 +405,14 @@ func (r *run) call(ctx context.Context, seq int) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.url, bytes.NewReader(r.body(seq)))
 	if err != nil {
-		r.record(func(rep *Report) { rep.Sent++; rep.TransportErrors++; rep.Samples["transport"] = err.Error() })
+		r.record(func(rep *Report) { rep.Sent++; rep.TransportErrors++; rep.Samples["transport"] = r.clean(err.Error()) })
 		return
 	}
 	req.Header = r.headers.Clone()
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		r.record(func(rep *Report) { rep.Sent++; rep.TransportErrors++; rep.Samples["transport"] = err.Error() })
+		r.record(func(rep *Report) { rep.Sent++; rep.TransportErrors++; rep.Samples["transport"] = r.clean(err.Error()) })
 		return
 	}
 	defer resp.Body.Close()
@@ -399,7 +424,7 @@ func (r *run) call(ctx context.Context, seq int) {
 			rep.Sent++
 			rep.Statuses[status]++
 			if _, seen := rep.Samples[status]; !seen {
-				rep.Samples[status] = strings.TrimSpace(string(sample))
+				rep.Samples[status] = r.clean(string(sample))
 			}
 		})
 		return
@@ -418,9 +443,27 @@ func (r *run) call(ctx context.Context, seq int) {
 		rep.Statuses[status]++
 		if readErr != nil {
 			rep.BrokenStreams++
-			rep.Samples["broken_stream"] = readErr.Error()
+			rep.Samples["broken_stream"] = r.clean(readErr.Error())
 		}
 	})
+}
+
+// clean makes text from the gateway safe to print and publish. It is untrusted:
+// control characters could rewrite the terminal or forge a verdict line, bidi
+// marks could disguise it, and a careless gateway could echo the API key.
+func (r *run) clean(text string) string {
+	for _, secret := range []string{r.o.APIKey, r.o.OracleToken} {
+		if secret != "" {
+			text = strings.ReplaceAll(text, secret, "[redacted]")
+		}
+	}
+	text = strings.ToValidUTF8(text, "?")
+	return strings.TrimSpace(strings.Map(func(c rune) rune {
+		if unicode.IsControl(c) || unicode.Is(unicode.Cf, c) {
+			return ' '
+		}
+		return c
+	}, text))
 }
 
 func (r *run) record(update func(*Report)) {
@@ -463,7 +506,8 @@ func (r *run) readOracle(ctx context.Context, url string) (mock.Snapshot, error)
 	if err != nil {
 		return mock.Snapshot{}, err
 	}
-	resp, err := r.client.Do(req)
+	req.Header.Set(mock.TokenHeader, r.o.OracleToken)
+	resp, err := r.oracle.Do(req)
 	if err != nil {
 		return mock.Snapshot{}, fmt.Errorf("reading oracle: %w", err)
 	}
@@ -508,11 +552,21 @@ func judge(rep *Report, scenario string) (verdict string, reasons, warnings []st
 		warnings = append(warnings, "no disconnect reached the provider; the gateway may read streams to the end")
 	}
 
+	if provider.Overloaded > 0 {
+		warnings = append(warnings, fmt.Sprintf("the provider turned away %d call(s) as overloaded", provider.Overloaded))
+	}
+
 	switch {
+	case provider.Foreign > 0:
+		return Inconclusive, []string{fmt.Sprintf("%d billed call(s) did not carry this run's ID, so the bill cannot be attributed to this run", provider.Foreign)}, warnings
 	case rep.Billed > rep.Cap:
 		return Breached, []string{fmt.Sprintf("the provider billed %s against a %s cap", rep.Billed, rep.Cap)}, warnings
 	case provider.Requests == 0:
 		return Inconclusive, []string{"no call reached the provider, so the gateway's setup is the likely problem"}, warnings
+	case scenario != Disconnect && provider.Requests < int64(rep.Admitted):
+		// Every prompt is unique, so no cache explains this. A gateway could fake
+		// successes, or delay its real calls until after the bill is read.
+		return Inconclusive, []string{fmt.Sprintf("%d success(es) but only %d call(s) reached the provider", rep.Admitted, provider.Requests)}, warnings
 	case configFailures > 0:
 		return Inconclusive, []string{fmt.Sprintf("%d call(s) got an authentication, routing or validation status, which is not a budget decision", configFailures)}, warnings
 	case serverFailures > 0 || rep.TransportErrors > 0:
@@ -533,7 +587,8 @@ func classify(statuses map[string]int) (config, server, refusals int) {
 		case err != nil:
 			server += n
 		case code < 300:
-		case code < 400, code == 401, code == 404, code == 405, code == 413, code == 415, code == 422:
+		// 422 stays a refusal: LiteLLM reports an exceeded budget with it.
+		case code < 400, code == 401, code == 404, code == 405, code == 413, code == 415:
 			config += n
 		case code == 408, code >= 500:
 			server += n
