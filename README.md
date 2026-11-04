@@ -113,6 +113,12 @@ docker compose --profile run down -v
 
 Reports land in `results/`.
 
+## Test a real provider
+
+`capproof lab` measures what a real provider bills after a dropped stream, and how far
+past a spend cap usage can go. It uses your own key and a small amount of your own money,
+and sends nothing without `-confirm`. See [docs/provider-lab.md](docs/provider-lab.md).
+
 ## What these results can't tell you
 
 - **The provider is a mock.** Whether real providers keep billing after a disconnect

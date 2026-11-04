@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/NAMAN-VERMA-02/capproof/internal/control"
+	"github.com/NAMAN-VERMA-02/capproof/internal/lab"
 	"github.com/NAMAN-VERMA-02/capproof/internal/mock"
 	"github.com/NAMAN-VERMA-02/capproof/internal/money"
 	"github.com/NAMAN-VERMA-02/capproof/internal/runner"
@@ -28,6 +29,7 @@ const usage = `capproof tests whether an LLM spend cap holds when things go wron
 Commands:
   mock    run the fake provider and billing oracle
   control run a calibration gateway: naive must fail, strict must pass
+  lab     measure a real provider, using your own key and money
   bench   measure added latency on a fixed schedule
   run     send a scenario through a gateway and judge it against the oracle
 
@@ -47,6 +49,8 @@ func main() {
 		err = runMock(os.Args[2:])
 	case "control":
 		err = runControl(os.Args[2:])
+	case "lab":
+		err = runLab(os.Args[2:])
 	case "bench":
 		err = runBench(os.Args[2:])
 	case "run":
@@ -136,6 +140,55 @@ func runControl(args []string) error {
 	}
 	log.Printf("%s control gateway listening on %s", *mode, *addr)
 	return serve(*addr, gw)
+}
+
+func runLab(args []string) error {
+	fs := flag.NewFlagSet("lab", flag.ContinueOnError)
+	var o lab.Options
+	fs.StringVar(&o.Provider, "provider", "", "openai or anthropic")
+	fs.StringVar(&o.Model, "model", "", "model name")
+	fs.StringVar(&o.Phase, "phase", lab.Full, "full, cancel or cap")
+	fs.IntVar(&o.Calls, "calls", 20, "most calls to send")
+	fs.IntVar(&o.MaxTokens, "max-tokens", 300, "output limit per call")
+	fs.DurationVar(&o.Delay, "delay", time.Second, "wait between calls")
+	fs.BoolVar(&o.Confirm, "confirm", false, "actually send calls and spend money; without it nothing is sent")
+	fs.StringVar(&o.BaseURL, "base-url", "", "only the official API or loopback is accepted")
+	in := fs.String("input-usd-per-mtok", "", "input price, from the provider's price list")
+	out := fs.String("output-usd-per-mtok", "", "output price, from the provider's price list")
+	limit := fs.String("max-spend-usd", "1", "refuse to start if the worst case is above this")
+	jsonOut := fs.String("json", "", "also write the report to this file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var err error
+	if o.InputRate, err = money.ParseRate(*in); err != nil {
+		return fmt.Errorf("-input-usd-per-mtok: %w", err)
+	}
+	if o.OutputRate, err = money.ParseRate(*out); err != nil {
+		return fmt.Errorf("-output-usd-per-mtok: %w", err)
+	}
+	if o.MaxSpend, err = money.ParseUSD(*limit); err != nil {
+		return fmt.Errorf("-max-spend-usd: %w", err)
+	}
+	if o.MaxSpend == 0 {
+		return errors.New("-max-spend-usd must be above zero")
+	}
+	o.APIKey = os.Getenv("CAPPROOF_LAB_KEY")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	rep, err := lab.Run(ctx, o)
+	if err != nil {
+		return err
+	}
+	fmt.Print(rep.Text())
+	if *jsonOut != "" {
+		raw, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(*jsonOut, append(raw, 0x0a), 0o644)
+	}
+	return nil
 }
 
 func runBench(args []string) error {
