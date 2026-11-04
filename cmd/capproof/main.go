@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,17 +11,22 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/NAMAN-VERMA-02/capproof/internal/mock"
 	"github.com/NAMAN-VERMA-02/capproof/internal/money"
+	"github.com/NAMAN-VERMA-02/capproof/internal/runner"
 )
 
 const usage = `capproof tests whether an LLM spend cap holds when things go wrong.
 
 Commands:
   mock    run the fake provider and billing oracle
+  run     send a scenario through a gateway and judge it against the oracle
+
+Exit codes for run: 0 held, 1 breached, 2 inconclusive, 3 could not run.
 
 Run "capproof <command> -h" for a command's flags.
 `
@@ -34,6 +40,8 @@ func main() {
 	switch os.Args[1] {
 	case "mock":
 		err = runMock(os.Args[2:])
+	case "run":
+		err = runScenario(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -79,6 +87,75 @@ func runMock(args []string) error {
 	}
 	log.Printf("mock provider and oracle listening on %s", *addr)
 	return serve(*addr, server.Handler())
+}
+
+type headerList []string
+
+func (h *headerList) String() string     { return strings.Join(*h, ", ") }
+func (h *headerList) Set(v string) error { *h = append(*h, v); return nil }
+
+func runScenario(args []string) error {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	var o runner.Options
+	var headers headerList
+	fs.StringVar(&o.Scenario, "scenario", runner.Burst, "burst, sequential or disconnect")
+	fs.StringVar(&o.Target, "target", "", "base URL of the gateway under test")
+	fs.StringVar(&o.Oracle, "oracle", "http://127.0.0.1:9400", "base URL of the mock provider")
+	fs.StringVar(&o.Format, "format", "openai", "openai or anthropic")
+	fs.StringVar(&o.Model, "model", "gpt-4o-mini", "model name, as the gateway expects it")
+	capUSD := fs.String("cap-usd", "", "budget configured on the gateway, in dollars")
+	fs.Var(&headers, "H", `extra header, repeatable; {run} expands to the run ID, for example -H "X-Run-Id: {run}"`)
+	fs.IntVar(&o.Requests, "requests", 30, "calls in the first wave")
+	fs.IntVar(&o.Concurrency, "concurrency", 0, "calls at once; defaults to all of them for burst and 1 otherwise")
+	fs.IntVar(&o.Wave2, "wave2", 0, "calls sent after the settle wait, to catch late accounting")
+	fs.DurationVar(&o.Settle, "settle", 15*time.Second, "wait before the second wave")
+	fs.IntVar(&o.MaxTokens, "max-tokens", 500, "max_tokens on each call")
+	fs.IntVar(&o.PromptBytes, "prompt-bytes", 4000, "prompt size on each call")
+	fs.BoolVar(&o.Stream, "stream", false, "stream responses; always on for the disconnect scenario")
+	fs.DurationVar(&o.Timeout, "timeout", 60*time.Second, "timeout per call")
+	fs.DurationVar(&o.Drain, "drain", 60*time.Second, "how long the provider may take to go idle")
+	fs.StringVar(&o.RunID, "run-id", "", "run ID; generated when empty")
+	mockJSON := fs.String("mock", "", `provider overrides for this run, for example '{"usage":"omit"}'`)
+	jsonOut := fs.String("json", "", "also write the full report to this file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	var err error
+	if o.Cap, err = money.ParseUSD(*capUSD); err != nil {
+		return fmt.Errorf("-cap-usd: %w", err)
+	}
+	o.Headers = headers
+	o.Mock = json.RawMessage(*mockJSON)
+	// From the environment, so the key stays out of the process list and shell history.
+	o.APIKey = os.Getenv("CAPPROOF_API_KEY")
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	rep, err := runner.Run(ctx, o)
+	if err != nil {
+		return err
+	}
+	fmt.Print(rep.Text())
+	if *jsonOut != "" {
+		raw, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(*jsonOut, append(raw, 0x0a), 0o644); err != nil {
+			return err
+		}
+	}
+	switch rep.Verdict {
+	case runner.Held:
+		return nil
+	case runner.Breached:
+		os.Exit(1)
+	}
+	os.Exit(2)
+	return nil
 }
 
 // serve runs until interrupted, then lets in-flight calls finish so their bills
