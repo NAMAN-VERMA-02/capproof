@@ -1,0 +1,56 @@
+# Isolated on purpose: LiteLLM's published packages were compromised twice in 2026,
+# so the gateway gets no internet route, no real keys and only its config mounted.
+services:
+  mock:
+    build: ../..
+    command: ["mock", "-addr", ":9400"]
+    environment:
+      CAPPROOF_ORACLE_TOKEN: capproof-local-test-token
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 2g
+    pids_limit: 512
+    networks: [isolated]
+  postgres:
+    image: postgres@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_PASSWORD: capproof-fake
+      POSTGRES_DB: litellm
+    networks: [isolated]
+  litellm:
+    # Untrusted: it can reach the mock but never gets the oracle token.
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    pids_limit: 1024
+    # v1.106.6, built 2026-10-28, after the 2026-10-21 compromise.
+    image: ghcr.io/berriai/litellm-database@sha256:7ef0e78fe00ad5ea7ea45666cc1d1f02cb7076aee69091543bf397de52db33ce
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      DATABASE_URL: postgresql://postgres:capproof-fake@postgres:5432/litellm
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on: [postgres, mock]
+    networks: [isolated]
+  runner:
+    build: ../..
+    profiles: [run]
+    user: "0"
+    entrypoint: ["sh", "/adapter/run.sh"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 2g
+    pids_limit: 512
+    environment:
+      CAPPROOF_ORACLE_TOKEN: capproof-local-test-token
+      GATEWAY: litellm-1.106.6
+    volumes:
+      - ../:/adapters:ro
+      - ./:/adapter:ro
+      - ../../results:/results
+    depends_on: [litellm]
+    networks: [isolated]
+
+networks:
+  isolated:
+    internal: true

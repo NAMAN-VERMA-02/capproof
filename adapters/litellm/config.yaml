@@ -1,0 +1,9 @@
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_base: http://mock:9400/v1
+      api_key: capproof-fake
+      num_retries: 0
+general_settings:
+  master_key: sk-capproof-fake-master

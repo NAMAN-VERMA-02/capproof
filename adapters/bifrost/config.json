@@ -1,0 +1,193 @@
+{
+ "version": 2,
+ "client": {
+  "enforce_auth_on_inference": true
+ },
+ "config_store": {
+  "enabled": true,
+  "type": "sqlite",
+  "config": {
+   "path": "/app/state/config.db"
+  }
+ },
+ "framework": {
+  "pricing": {
+   "pricing_url": "file:///app/prices/pricing.json",
+   "pricing_sync_interval": 86400,
+   "model_parameters_url": "file:///app/prices/pricing.json"
+  }
+ },
+ "providers": {
+  "openai": {
+   "keys": [
+    {
+     "name": "k1",
+     "value": "env.OPENAI_API_KEY",
+     "models": [
+      "*"
+     ],
+     "weight": 1.0
+    }
+   ],
+   "network_config": {
+    "base_url": "http://mock:9400",
+    "max_retries": 0,
+    "allow_private_network": true
+   },
+   "concurrency_and_buffer_size": {
+    "concurrency": 200,
+    "buffer_size": 400
+   }
+  }
+ },
+ "governance": {
+  "virtual_keys": [
+   {
+    "id": "vk-burst",
+    "name": "capproof-burst",
+    "value": "sk-bf-capproof-burst",
+    "is_active": true,
+    "provider_configs": [
+     {
+      "provider": "openai",
+      "allowed_models": [
+       "*"
+      ],
+      "key_ids": [
+       "*"
+      ],
+      "weight": 1
+     }
+    ]
+   },
+   {
+    "id": "vk-burst-stream",
+    "name": "capproof-burst-stream",
+    "value": "sk-bf-capproof-burst-stream",
+    "is_active": true,
+    "provider_configs": [
+     {
+      "provider": "openai",
+      "allowed_models": [
+       "*"
+      ],
+      "key_ids": [
+       "*"
+      ],
+      "weight": 1
+     }
+    ]
+   },
+   {
+    "id": "vk-sequential",
+    "name": "capproof-sequential",
+    "value": "sk-bf-capproof-sequential",
+    "is_active": true,
+    "provider_configs": [
+     {
+      "provider": "openai",
+      "allowed_models": [
+       "*"
+      ],
+      "key_ids": [
+       "*"
+      ],
+      "weight": 1
+     }
+    ]
+   },
+   {
+    "id": "vk-disconnect",
+    "name": "capproof-disconnect",
+    "value": "sk-bf-capproof-disconnect",
+    "is_active": true,
+    "provider_configs": [
+     {
+      "provider": "openai",
+      "allowed_models": [
+       "*"
+      ],
+      "key_ids": [
+       "*"
+      ],
+      "weight": 1
+     }
+    ]
+   },
+   {
+    "id": "vk-omit",
+    "name": "capproof-omit",
+    "value": "sk-bf-capproof-omit",
+    "is_active": true,
+    "provider_configs": [
+     {
+      "provider": "openai",
+      "allowed_models": [
+       "*"
+      ],
+      "key_ids": [
+       "*"
+      ],
+      "weight": 1
+     }
+    ]
+   },
+   {
+    "id": "vk-malformed",
+    "name": "capproof-malformed",
+    "value": "sk-bf-capproof-malformed",
+    "is_active": true,
+    "provider_configs": [
+     {
+      "provider": "openai",
+      "allowed_models": [
+       "*"
+      ],
+      "key_ids": [
+       "*"
+      ],
+      "weight": 1
+     }
+    ]
+   }
+  ],
+  "budgets": [
+   {
+    "id": "bud-burst",
+    "max_limit": 0.0045,
+    "reset_duration": "1d",
+    "virtual_key_id": "vk-burst"
+   },
+   {
+    "id": "bud-burst-stream",
+    "max_limit": 0.0045,
+    "reset_duration": "1d",
+    "virtual_key_id": "vk-burst-stream"
+   },
+   {
+    "id": "bud-sequential",
+    "max_limit": 0.0045,
+    "reset_duration": "1d",
+    "virtual_key_id": "vk-sequential"
+   },
+   {
+    "id": "bud-disconnect",
+    "max_limit": 0.0045,
+    "reset_duration": "1d",
+    "virtual_key_id": "vk-disconnect"
+   },
+   {
+    "id": "bud-omit",
+    "max_limit": 0.0045,
+    "reset_duration": "1d",
+    "virtual_key_id": "vk-omit"
+   },
+   {
+    "id": "bud-malformed",
+    "max_limit": 0.0045,
+    "reset_duration": "1d",
+    "virtual_key_id": "vk-malformed"
+   }
+  ]
+ }
+}

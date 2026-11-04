@@ -1,0 +1,50 @@
+# Isolated: no internet route and no real keys.
+services:
+  mock:
+    build: ../..
+    command: ["mock", "-addr", ":9400"]
+    environment:
+      CAPPROOF_ORACLE_TOKEN: capproof-local-test-token
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 2g
+    pids_limit: 512
+    networks: [isolated]
+  bifrost:
+    # Untrusted: it can reach the mock but never gets the oracle token.
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    pids_limit: 1024
+    # maximhq/bifrost:latest on 2026-11-04, built 2026-10-29 (transports v2.4.0).
+    image: maximhq/bifrost@sha256:a1c90607dcfd13c1fb2f9476ceb3bb24407a50ade7fdf3e61a59fb42b09e5c57
+    environment:
+      OPENAI_API_KEY: capproof-fake
+    volumes:
+      - ./config.json:/app/data/config.json:ro
+      - ./pricing.json:/app/prices/pricing.json:ro
+    tmpfs:
+      - /app/state:mode=1777
+    depends_on: [mock]
+    networks: [isolated]
+  runner:
+    build: ../..
+    profiles: [run]
+    user: "0"
+    entrypoint: ["sh", "/adapter/run.sh"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 2g
+    pids_limit: 512
+    environment:
+      CAPPROOF_ORACLE_TOKEN: capproof-local-test-token
+      GATEWAY: bifrost-2.4.0
+    volumes:
+      - ../:/adapters:ro
+      - ./:/adapter:ro
+      - ../../results:/results
+    depends_on: [bifrost]
+    networks: [isolated]
+
+networks:
+  isolated:
+    internal: true

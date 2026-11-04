@@ -10,3 +10,6 @@
 .env.*
 *.db
 *.sqlite*
+
+# Gateway results stay local until maintainers have been told.
+/results/
