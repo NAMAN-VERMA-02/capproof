@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Actions are pinned by SHA: a moved tag must not be able to change this pipeline.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      # The race detector is the point on Linux; timing bugs in a budget are the whole subject.
+      - name: Test with the race detector
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 ./...
+      - name: Test
+        if: runner.os == 'Windows'
+        run: go test -count=1 ./...
+      - name: Check for known vulnerabilities
+        if: runner.os == 'Linux'
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
