@@ -44,7 +44,10 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config()
 	input := InputTokens(req.Messages, req.System, req.Tools)
 	output, truncated := outputTokens(cfg, *req.MaxTokens)
-	s.begin(cfg, input)
+	if !s.begin(cfg, input, body) {
+		writeJSON(w, http.StatusServiceUnavailable, anthropicError("the mock provider is overloaded"))
+		return
+	}
 	defer s.end()
 
 	stop := "end_turn"
