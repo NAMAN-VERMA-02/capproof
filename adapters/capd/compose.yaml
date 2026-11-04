@@ -1,0 +1,47 @@
+# capd under the same suite as every other gateway, with the same isolation.
+services:
+  mock:
+    build: ../..
+    command: ["mock", "-addr", ":9400"]
+    environment:
+      CAPPROOF_ORACLE_TOKEN: capproof-local-test-token
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 2g
+    pids_limit: 512
+    networks: [isolated]
+  capd:
+    build: ../..
+    entrypoint: ["capd", "-config", "/adapter/capd.json"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 2g
+    pids_limit: 512
+    volumes:
+      - ./:/adapter:ro
+    tmpfs:
+      - /state:mode=1777
+    depends_on: [mock]
+    networks: [isolated]
+  runner:
+    build: ../..
+    profiles: [run]
+    user: "0"
+    entrypoint: ["sh", "/adapter/run.sh"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 2g
+    pids_limit: 512
+    environment:
+      CAPPROOF_ORACLE_TOKEN: capproof-local-test-token
+      GATEWAY: capd
+    volumes:
+      - ../:/adapters:ro
+      - ./:/adapter:ro
+      - ../../published:/results
+    depends_on: [capd]
+    networks: [isolated]
+
+networks:
+  isolated:
+    internal: true

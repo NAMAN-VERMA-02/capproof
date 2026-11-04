@@ -28,6 +28,7 @@ const usage = `capproof tests whether an LLM spend cap holds when things go wron
 Commands:
   mock    run the fake provider and billing oracle
   control run a calibration gateway: naive must fail, strict must pass
+  bench   measure added latency on a fixed schedule
   run     send a scenario through a gateway and judge it against the oracle
 
 Exit codes for run: 0 held, 1 breached, 2 inconclusive, 3 could not run.
@@ -46,6 +47,8 @@ func main() {
 		err = runMock(os.Args[2:])
 	case "control":
 		err = runControl(os.Args[2:])
+	case "bench":
+		err = runBench(os.Args[2:])
 	case "run":
 		err = runScenario(os.Args[2:])
 	case "-h", "--help", "help":
@@ -133,6 +136,31 @@ func runControl(args []string) error {
 	}
 	log.Printf("%s control gateway listening on %s", *mode, *addr)
 	return serve(*addr, gw)
+}
+
+func runBench(args []string) error {
+	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
+	var o runner.BenchOptions
+	fs.StringVar(&o.Target, "target", "", "base URL to measure")
+	fs.IntVar(&o.Rate, "rate", 200, "calls per second, held regardless of the target's speed")
+	fs.DurationVar(&o.Duration, "duration", 30*time.Second, "how long to send")
+	fs.StringVar(&o.Model, "model", "gpt-4o-mini", "model name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	o.APIKey = os.Getenv("CAPPROOF_API_KEY")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	rep, err := runner.Bench(ctx, o)
+	if err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(rep, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(raw))
+	return nil
 }
 
 type headerList []string

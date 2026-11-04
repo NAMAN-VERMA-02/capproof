@@ -1,0 +1,52 @@
+{
+ "listen": ":8787",
+ "db": "/state/capd.db",
+ "synchronous": "FULL",
+ "openai_url": "http://mock:9400",
+ "anthropic_url": "http://mock:9400",
+ "keys": [
+  {
+   "name": "burst",
+   "sha256": "6c8584c1fe9a2e3386b88dcea6f794a5c76acf21ab8de6561d916c289c90fee8",
+   "budget_usd": "0.0045"
+  },
+  {
+   "name": "burst-stream",
+   "sha256": "a65a97d60fc704f54b822e4b6f98966264a07f552a7c597c8b4c6c00c981acf9",
+   "budget_usd": "0.0045"
+  },
+  {
+   "name": "sequential",
+   "sha256": "e30931db02a1b5be82a6b5b0b78360f762943a3502c6013048484c1285347f59",
+   "budget_usd": "0.0045"
+  },
+  {
+   "name": "disconnect",
+   "sha256": "23e13a66e9bde1b09362cda3c36d97601bb85deeac0a535117bd4505e91b815d",
+   "budget_usd": "0.0045"
+  },
+  {
+   "name": "omit",
+   "sha256": "546997a327e4492476ef7f9f5b21645a85902873cadf3d4af2bbdec306cd9ff8",
+   "budget_usd": "0.0045"
+  },
+  {
+   "name": "malformed",
+   "sha256": "fb340ac8ec1e76a2c244953dcf0fde1be4f73b27a12053c2099581863afdc015",
+   "budget_usd": "0.0045"
+  },
+  {
+   "name": "run",
+   "sha256": "6d9184a7eef1bd1804c24646d746074b8246ad87b1cc7c789ed9f3ad00ec0a3e",
+   "budget_usd": "1",
+   "run_budget_usd": "0.0045"
+  }
+ ],
+ "prices": {
+  "gpt-4o-mini": {
+   "input": "0.15",
+   "output": "0.60",
+   "cache_write": "0.15"
+  }
+ }
+}
