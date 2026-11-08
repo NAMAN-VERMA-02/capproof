@@ -15,7 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"regexp"
@@ -356,7 +356,7 @@ func (s *Server) meteredCall(w http.ResponseWriter, r *http.Request, path, runID
 	}
 	id, decision, err := s.ledger.Reserve(r.Context(), scopes, hold)
 	if err != nil {
-		log.Printf("key=%s reservation failed, refusing the call: %v", k.name, err)
+		slog.Error("reservation failed, refusing the call", "key", k.name, "err", err)
 		s.fail(w, path, http.StatusServiceUnavailable, "ledger_unavailable", "the budget ledger is unavailable, so the call was not sent")
 		return
 	}
@@ -381,7 +381,7 @@ func (s *Server) meteredCall(w http.ResponseWriter, r *http.Request, path, runID
 		defer cancel()
 		if err := apply(ctx); err != nil {
 			// The hold stays open, so the budget stays reserved until a restart captures it.
-			log.Printf("key=%s hold=%d settlement failed: %v", k.name, id, err)
+			slog.Error("settlement failed; the hold stays open", "key", k.name, "hold", id, "err", err)
 		}
 	}
 	defer func() {
@@ -396,7 +396,7 @@ func (s *Server) meteredCall(w http.ResponseWriter, r *http.Request, path, runID
 		settle(func(ctx context.Context) error { return s.ledger.Release(ctx, id) })
 	case costKnown:
 		if cost > hold {
-			log.Printf("OVERAGE key=%s hold=%d cost %s exceeded the %s held; the provider broke an assumption", k.name, id, cost, hold)
+			slog.Warn("OVERAGE: cost exceeded the hold; the provider broke an assumption", "key", k.name, "hold_id", id, "cost", cost.String(), "held", hold.String())
 		}
 		settle(func(ctx context.Context) error { return s.ledger.Settle(ctx, id, cost) })
 	default:
@@ -457,7 +457,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, path, base, apiKe
 	if err != nil {
 		// The call may have reached the provider before failing, so the hold stands.
 		if !errors.Is(err, context.Canceled) {
-			log.Printf("upstream call failed: %v", err)
+			slog.Error("upstream call failed", "err", err)
 			s.fail(w, path, http.StatusBadGateway, "upstream_error", "the provider could not be reached")
 		}
 		return costUnknown, 0
@@ -595,7 +595,7 @@ func (s *Server) noteRepeat(keyName, runID string, body []byte) {
 		}
 	}
 	if repeats == repeatThreshold {
-		log.Printf("LOOP? key=%s run=%s sent the same latest message %d times in %d calls", keyName, runID, repeats, len(window))
+		slog.Warn("possible agent loop: same latest message repeated", "key", keyName, "run", runID, "repeats", repeats, "calls", len(window))
 	}
 }
 
