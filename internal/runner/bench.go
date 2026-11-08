@@ -34,6 +34,7 @@ type BenchReport struct {
 	Sent     int     `json:"sent"`
 	Failed   int     `json:"failed"`
 	P50MS    float64 `json:"p50_ms"`
+	P95MS    float64 `json:"p95_ms"`
 	P99MS    float64 `json:"p99_ms"`
 	P999MS   float64 `json:"p999_ms"`
 	MaxMS    float64 `json:"max_ms"`
@@ -118,7 +119,7 @@ func Bench(ctx context.Context, o BenchOptions) (*BenchReport, error) {
 	}
 	return &BenchReport{
 		Target: o.Target, Rate: o.Rate, Sent: total, Failed: failed,
-		P50MS: at(0.50), P99MS: at(0.99), P999MS: at(0.999), MaxMS: at(1),
+		P50MS: at(0.50), P95MS: at(0.95), P99MS: at(0.99), P999MS: at(0.999), MaxMS: at(1),
 		Achieved: float64(len(latencies)) / elapsed.Seconds(),
 	}, nil
 }

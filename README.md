@@ -131,7 +131,7 @@ and sends nothing without `-confirm`. See [docs/provider-lab.md](docs/provider-l
 ## Status
 
 v0.1. Early, and not yet tested against real providers. Results for other gateways stay
-unpublished until the maintainers involved have had a chance to respond. See [SECURITY.md](SECURITY.md) for the threat model.
+unpublished until the maintainers involved have had a chance to respond. See [THREAT_MODEL.md](THREAT_MODEL.md) for the threat model, [ARCHITECTURE.md](ARCHITECTURE.md) for the design and [TESTING.md](TESTING.md) for what each test proves.
 
 The burst approach builds on
 [per-run-budget-benchmark](https://github.com/domondi1/per-run-budget-benchmark)

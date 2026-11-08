@@ -7,7 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -54,7 +54,7 @@ func run(path string) error {
 	}
 	defer ledger.Close()
 	if recovered > 0 {
-		log.Printf("charged %d call(s) left open by a crash at their full hold", recovered)
+		slog.Warn("charged calls left open by a crash at their full hold", "calls", recovered)
 	}
 	server, err := capd.New(cfg, ledger)
 	if err != nil {
@@ -63,10 +63,14 @@ func run(path string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srv := &http.Server{Addr: cfg.Listen, Handler: server, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: cfg.Listen, Handler: server,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: it would cut off long streamed responses mid-stream; each upstream call has its own timeout.
+	}
 	failed := make(chan error, 1)
 	go func() { failed <- srv.ListenAndServe() }()
-	log.Printf("capd listening on %s", cfg.Listen)
+	slog.Info("capd listening", "addr", cfg.Listen)
 	select {
 	case err := <-failed:
 		if !errors.Is(err, http.ErrServerClosed) {

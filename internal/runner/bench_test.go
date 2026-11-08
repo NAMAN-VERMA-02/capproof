@@ -29,7 +29,7 @@ func TestBenchMeasuresFromTheSchedule(t *testing.T) {
 	if rep.MaxMS < 500 {
 		t.Fatalf("max %.1fms hides the queue", rep.MaxMS)
 	}
-	if rep.P50MS > rep.P99MS || rep.P99MS > rep.MaxMS {
+	if rep.P50MS > rep.P95MS || rep.P95MS > rep.P99MS || rep.P99MS > rep.MaxMS {
 		t.Fatalf("percentiles out of order: %+v", rep)
 	}
 }
